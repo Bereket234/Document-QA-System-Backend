@@ -22,11 +22,18 @@ Follow these steps to get the project up and running:
    cd document_qa_system
 
 2. **Install Dependencies**:
-
-After navigating to the project directory, install the necessary packages by running:
+   After navigating to the project directory, install the necessary packages by running:
 
     ```bash
     npm install
+## Building and Running the Project
+
+1. **Building and Running the Project**:
+   
+   To compile the TypeScript files into JavaScript, run:
+
+   ```bash
+   npm run build
 
 
 
