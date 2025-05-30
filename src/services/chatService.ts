@@ -1,109 +1,253 @@
 import { OpenAI } from "openai";
 import { MessageTypes, ChatTypes } from "../types/messageTypes";
 import ChatHistory, { IChatHistory } from "../models/chatHistory";
-import { OpenAIEmbeddings } from "@langchain/openai";
+import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
 import { Pinecone } from "@pinecone-database/pinecone";
 import configs from "../config/configs";
 import { PineconeIndeices } from "../types/types";
+import { BufferMemory } from "langchain/memory";
+import { PromptTemplate } from "@langchain/core/prompts";
+import { ConversationChain, LLMChain } from "langchain/chains";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const pinecone = new Pinecone({ apiKey: configs.PINECONE_API_KEY });
 
-export async function messageChat( prompt: string) {
-    const chatType= ChatTypes.TEXT
+const adPrompt = new PromptTemplate({
+  template: `
+  You are an expert ad copywriter.
+  
+  Conversation so far:
+  {history}
+  
+  New Input:
+  {input}
+  
+  Generate the following:
+  - A catchy hook (1 sentence)
+  - Ad creative (2-3 lines max)
+  - Body text (around 50-75 words)
+  
+  Respond in this format:
+  Hook: ...
+  Ad Creative: ...
+  Body Text: ...
+  Make your response in markdown.
+    `,
+  inputVariables: ["history", "input"],
+});
 
-    const recentChats: IChatHistory[] = await ChatHistory.find({ type: chatType })
-        .sort({ createdAt: 1 })  
-        .limit(15);
+const model = new ChatOpenAI({
+  temperature: 0.7,
+  modelName: "gpt-3.5-turbo",
+});
 
-    const messages: any= [];
+const memory = new BufferMemory({
+  returnMessages: true,
+  memoryKey: "history",
+});
 
-    messages.push({ role: MessageTypes.SYSTEM, content: "Thank you for your continued engagement!" });
+export const adChain = new ConversationChain({
+  llm: model,
+  memory,
+  prompt: adPrompt,
+});
 
-    recentChats.forEach(chat => {
-        if (chat.role !== MessageTypes.FILE) {
-            messages.push({ role: chat.role, content: chat.content });
-        }
-    });
+export async function messageChat(prompt: string) {
+  const chatType = ChatTypes.TEXT;
 
-    messages.push({ role: MessageTypes.USER, content: `${prompt}. make your response in markdown` });
+  const recentChats: IChatHistory[] = await ChatHistory.find({ type: chatType })
+    .sort({ createdAt: 1 })
+    .limit(15);
+  const formattedHistory = recentChats.map((chat) => ({
+    role: chat.role === MessageTypes.USER ? "user" : "assistant",
+    content: chat.content,
+  }));
+  for (const msg of formattedHistory) {
+    await adChain.memory?.saveContext(
+      { input: msg.content }, 
+      { output: "" }
+    );
+  }
 
-    const completion = await openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
-        messages: messages,
-        max_tokens: 200,
-    });
+  // Run chain with new user input
+  const result = await adChain.call({ input: prompt });
+  const responseContent = result.response;
 
-    const responseContent = completion.choices[0].message.content;
+  const userMessage = new ChatHistory({
+    role: MessageTypes.USER,
+    type: chatType,
+    content: prompt,
+  });
+  await userMessage.save();
 
-    const userMessage = new ChatHistory({
-        role: MessageTypes.USER,
-        type: chatType,
-        content: prompt,
-    });
-    await userMessage.save();
+  const assistantMessage = new ChatHistory({
+    role: MessageTypes.ASSISTANT,
+    type: chatType,
+    content: responseContent,
+  });
+  await assistantMessage.save();
 
-    const assistantMessage = new ChatHistory({
-        role: MessageTypes.ASSISTANT,
-        type: chatType,
-        content: responseContent,
-    });
-    await assistantMessage.save();
-
-    return responseContent;
+  return responseContent;
 }
 
+// export async function chatWithPDF(query: string) {
+//   const queryEmbedding = await new OpenAIEmbeddings().embedQuery(query);
+
+//   let queryResponse = await pinecone
+//     .index(PineconeIndeices.DOCUMENT_QA_SYSTEM)
+//     .query({
+//       vector: queryEmbedding,
+//       topK: 3,
+//       includeMetadata: true,
+//     });
+
+//   const concatenatedText = queryResponse.matches
+//     .map(
+//       (match: any) =>
+//         `chunk: ${match.metadata.chunk}- entities:${match.metadata.entities}`
+//     )
+//     .join(" ");
+
+//   const recentChats: IChatHistory[] = await ChatHistory.find({
+//     type: ChatTypes.PDF,
+//   })
+//     .sort({ createdAt: 1 })
+//     .limit(15);
+
+//   const messages: any = [];
+
+//   messages.push({
+//     role: MessageTypes.SYSTEM,
+//     content: "Thank you for your continued engagement!",
+//   });
+
+//   recentChats.forEach((chat) => {
+//     if (chat.role !== MessageTypes.FILE) {
+//       messages.push({ role: chat.role, content: chat.content });
+//     }
+//   });
+//   messages.push({
+//     role: MessageTypes.USER,
+//     content: `Don't start your response with Based on the provided context. give me just the answer ${query} context:${concatenatedText}.`,
+//   });
+
+//   const completion = await openai.chat.completions.create({
+//     model: "gpt-3.5-turbo",
+//     messages: messages,
+//     max_tokens: 200,
+//   });
+
+//   const responseContent = completion.choices[0].message.content;
+
+//   const userMessage = new ChatHistory({
+//     role: MessageTypes.USER,
+//     type: ChatTypes.PDF,
+//     content: query,
+//   });
+//   await userMessage.save();
+
+//   const assistantMessage = new ChatHistory({
+//     role: MessageTypes.ASSISTANT,
+//     type: ChatTypes.PDF,
+//     content: responseContent,
+//   });
+//   await assistantMessage.save();
+
+//   return responseContent;
+// }
 
 
 export async function chatWithPDF(query: string) {
-    const queryEmbedding = await new OpenAIEmbeddings().embedQuery(query);
-    
-    let queryResponse = await pinecone.index(PineconeIndeices.DOCUMENT_QA_SYSTEM).query({
-        vector: queryEmbedding,
-        topK: 3,
-        includeMetadata: true,
+  const queryEmbedding = await new OpenAIEmbeddings().embedQuery(query);
+
+  const queryResponse = await pinecone
+    .index(PineconeIndeices.DOCUMENT_QA_SYSTEM)
+    .query({
+      vector: queryEmbedding,
+      topK: 3,
+      includeMetadata: true,
     });
 
-    const concatenatedText = queryResponse.matches
-        .map((match: any) => `chunk: ${match.metadata.chunk}- entities:${match.metadata.entities}`)
-        .join(" ");
+  const concatenatedText = queryResponse.matches
+    .map(
+      (match: any) =>
+        `chunk: ${match.metadata.chunk} - entities: ${match.metadata.entities}`
+    )
+    .join(" ");
 
-    const recentChats: IChatHistory[] = await ChatHistory.find({ type: ChatTypes.PDF })
-        .sort({ createdAt: 1 }) 
-        .limit(15);
+  // Recent chat messages
+  const recentChats = await ChatHistory.find({ type: ChatTypes.PDF })
+    .sort({ createdAt: 1 })
+    .limit(15);
 
-    const messages: any = [];
+  const messages = [];
 
-    messages.push({ role: MessageTypes.SYSTEM, content: "Thank you for your continued engagement!" });
+  messages.push({
+    role: MessageTypes.SYSTEM,
+    content: "You're an expert ad copywriter. Create engaging marketing content based on the context and user prompt.",
+  });
 
-    recentChats.forEach(chat => {
-        if (chat.role !== MessageTypes.FILE) {
-            messages.push({ role: chat.role, content: chat.content });
-        }
-    });
-    messages.push({ role: MessageTypes.USER, content: `Don't start your response with Based on the provided context. give me just the answer ${query} context:${concatenatedText}.` });
+  recentChats.forEach((chat) => {
+    if (chat.role !== MessageTypes.FILE) {
+      messages.push({ role: chat.role, content: chat.content });
+    }
+  });
 
-    const completion = await openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
-        messages: messages,
-        max_tokens: 200,
-    });
+  // 🧠 LangChain Ad Copy Prompt
+  const adPrompt = new PromptTemplate({
+    template: `
+You are an expert ad copywriter.
 
-    const responseContent = completion.choices[0].message.content;
+Given the following **product or business information** (from a PDF or user), generate:
+- Hook (1 sentence)
+- Ad Creative (2–3 lines)
+- Body Text (50–75 words)
 
-    const userMessage = new ChatHistory({
-        role: MessageTypes.USER,
-        type: ChatTypes.PDF,
-        content: query,
-    });
-    await userMessage.save();
+Context:
+{context}
 
-    const assistantMessage = new ChatHistory({
-        role: MessageTypes.ASSISTANT,
-        type: ChatTypes.PDF,
-        content: responseContent,
-    });
-    await assistantMessage.save();
+User Request:
+{question}
 
-    return responseContent;
+Respond in this format:
+Hook: ...
+Ad Creative: ...
+Body Text: ...
+    `,
+    inputVariables: ["context", "question"],
+  });
+
+  const model = new ChatOpenAI({
+    temperature: 0.7,
+    modelName: "gpt-3.5-turbo",
+  });
+
+  const chain = new LLMChain({
+    llm: model,
+    prompt: adPrompt,
+  });
+
+  const result = await chain.call({
+    context: concatenatedText,
+    question: query,
+  });
+
+  const responseContent = result.text;
+
+  // Save chat history
+  const userMessage = new ChatHistory({
+    role: MessageTypes.USER,
+    type: ChatTypes.PDF,
+    content: query,
+  });
+  await userMessage.save();
+
+  const assistantMessage = new ChatHistory({
+    role: MessageTypes.ASSISTANT,
+    type: ChatTypes.PDF,
+    content: responseContent,
+  });
+  await assistantMessage.save();
+
+  return responseContent;
 }
